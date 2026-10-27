@@ -20,6 +20,7 @@ use reqwest::{Response, StatusCode};
 use rmcp::model::Tool;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::pin;
@@ -305,6 +306,10 @@ fn resolve_ollama_num_ctx(options: &OllamaOptions) -> Option<usize> {
     options.input_limit
 }
 
+/// One-time guard for the GOOSE_INPUT_LIMIT num_ctx warning: the setting is
+/// resolved once into OllamaOptions, so one warning per process says it all.
+static NUM_CTX_WARNED: AtomicBool = AtomicBool::new(false);
+
 fn apply_ollama_options(
     payload: &mut Value,
     options: &OllamaOptions,
@@ -347,13 +352,19 @@ fn apply_ollama_options(
             if let Some(options_obj) = options_value.as_object_mut() {
                 options_obj.insert("num_ctx".to_string(), json!(limit));
             }
-            tracing::warn!(
-                "GOOSE_INPUT_LIMIT={limit} was sent as options.num_ctx, but Ollama's \
-                 OpenAI-compatible /v1 endpoint ignores `options`; the model loads at \
-                 its default context window. Set OLLAMA_CONTEXT_LENGTH on the Ollama \
-                 server (or OLLAMA_CONTEXT_LENGTH in its env) to change the loaded \
-                 window."
-            );
+            // apply_ollama_options runs on every stream call; the setting and its
+            // meaning do not change between them, so say it once instead of once
+            // per turn (a multi-turn session with compaction or subagents would
+            // otherwise repeat the same line for the whole session).
+            if !NUM_CTX_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "GOOSE_INPUT_LIMIT={limit} was sent as options.num_ctx, but Ollama's \
+                     OpenAI-compatible /v1 endpoint ignores `options`; the model loads at \
+                     its default context window. Set OLLAMA_CONTEXT_LENGTH on the Ollama \
+                     server (or OLLAMA_CONTEXT_LENGTH in its env) to change the loaded \
+                     window."
+                );
+            }
         }
     }
 }
